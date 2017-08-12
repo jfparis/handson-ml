@@ -1,0 +1,8 @@
+NVIDIA
+
+sudo tee /proc/acpi/bbswitch <<<ON
+cat /proc/acpi/bbswitch
+
+LD_LIBRARY_PATH=/usr/lib/nvidia-375/ nvidia-smi
+
+LD_LIBRARY_PATH=/usr/lib/nvidia-375/ python
