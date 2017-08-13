@@ -11,6 +11,13 @@ import numpy as np
 he_init = tf.contrib.layers.variance_scaling_initializer()
 
 
+def leaky_relu(alpha=0.01):
+    def parametrized_leaky_relu(z, name=None):
+        return tf.maximum(alpha * z, z, name=name)
+
+    return parametrized_leaky_relu
+
+
 class DNNClassifier(BaseEstimator, ClassifierMixin):
 
     def __init__(self, n_hidden_layers=5, n_neurons=100, optimizer_class=tf.train.AdamOptimizer,
@@ -51,7 +58,7 @@ class DNNClassifier(BaseEstimator, ClassifierMixin):
                     inputs = tf.layers.batch_normalization(inputs, training=training, momentum=0.9)
                 inputs = self.activation(inputs)
 
-            self.training_flag =  training
+            self._training_flag =  training
             return inputs
 
     def _build_graph(self, n_inputs, n_outputs):
@@ -83,6 +90,21 @@ class DNNClassifier(BaseEstimator, ClassifierMixin):
         self._accuracy = accuracy
         self._init = init
         self._saver = saver
+
+    def _get_model_params(self):
+        """Get all variable values (used for early stopping, faster than saving to disk)"""
+        with self._graph.as_default():
+            gvars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
+        return {gvar.op.name: value for gvar, value in zip(gvars, self._session.run(gvars))}
+
+    def _restore_model_params(self, model_params):
+        """Set all variables to the given values (for early stopping, faster than loading from disk)"""
+        gvar_names = list(model_params.keys())
+        assign_ops = {gvar_name: self._graph.get_operation_by_name(gvar_name + "/Assign")
+                      for gvar_name in gvar_names}
+        init_values = {gvar_name: assign_op.inputs[1] for gvar_name, assign_op in assign_ops.items()}
+        feed_dict = {init_values[gvar_name]: model_params[gvar_name] for gvar_name in gvar_names}
+        self._session.run(assign_ops, feed_dict=feed_dict)
 
     def fit(self, X, y, n_epochs=100, X_valid=None, y_valid=None):
         """Fit the model to the training set. If X_valid and y_valid are provided, use early stopping."""
@@ -120,6 +142,7 @@ class DNNClassifier(BaseEstimator, ClassifierMixin):
 
         checks_without_progress = 0
         best_loss = np.infty
+        best_params = None
 
         self._session = tf.Session(graph=self._graph)
         with self._session.as_default() as session:
@@ -128,14 +151,14 @@ class DNNClassifier(BaseEstimator, ClassifierMixin):
                 rnd_idx = np.random.permutation(len(X))
                 for rnd_indices in np.array_split(rnd_idx, len(X) // self.batch_size):
                     X_batch, y_batch = X[rnd_indices], y[rnd_indices]
-                    session.run([self._training_op, extra_update_ops], feed_dict={self._X: X_batch, self._y: y_batch, self._training_op: True})
+                    session.run([self._training_op, extra_update_ops], feed_dict={self._X: X_batch, self._y: y_batch, self._training_flag: True})
 
                 if X_valid is not None and y_valid is not None:
                     acc_sum_val, loss_sum_val, accuracy_val, loss_val = session.run([accuracy_str, loss_str, self._accuracy, self._loss ], feed_dict = {self._X: X_valid, self._y: y_valid})
                     filewriter.add_summary(loss_sum_val, epoch)
                     filewriter.add_summary(acc_sum_val,epoch)
                     if loss_val < best_loss:
-                        save_path = self._saver.save(session, "./my_mnist_model_0_to_4.ckpt")
+                        best_params = self._get_model_params()
                         best_loss = loss_val
                         checks_without_progress = 0
                     else:
@@ -145,10 +168,13 @@ class DNNClassifier(BaseEstimator, ClassifierMixin):
                             break
                     print("Epoch:", epoch, "loss:", loss_val, "accuracy:",accuracy_val)
 
-            if X_valid is not None and y_valid is not None: #used early stopping
-                self._saver.restore(session, "./my_mnist_model_0_to_4.ckpt")
+            if best_params:
+                self._restore_model_params(best_params)
                 acc_test = self._accuracy.eval(feed_dict={self._X: X_valid, self._y: y_valid})
                 print("Final test accuracy: {:.2f}%".format(acc_test * 100))
+
+
+        return self
 
     def predict_proba(self, X):
         if not self._session:
@@ -181,7 +207,7 @@ def test():
     y_test4 = y_test[test_indices]
 
 
-    dnc = DNNClassifier()
+    dnc = DNNClassifier(batch_size=500, n_neurons=140,  activation=leaky_relu(alpha=0.1), learning_rate=0.01, random_state=42, batch_normalisation = False)
     dnc.fit(X_train4, y_train4, 100, X_test4, y_test4)
 
 
@@ -204,13 +230,6 @@ def main():
     y_train4 = y_train[train_indices]
     y_test4 = y_test[test_indices]
 
-
-    def leaky_relu(alpha=0.01):
-        def parametrized_leaky_relu(z, name=None):
-            return tf.maximum(alpha * z, z, name=name)
-
-        return parametrized_leaky_relu
-
     param_distribs = {
         "n_neurons": [10, 30, 50, 70, 90, 100, 120, 140, 160],
         "batch_size": [10, 50, 100, 500],
@@ -221,7 +240,7 @@ def main():
         # "optimizer_class": [tf.train.AdamOptimizer, partial(tf.train.MomentumOptimizer, momentum=0.95)],
     }
 
-    rnd_search = GridSearchCV(DNNClassifier(random_state=42), param_distribs, #n_iter=50,
+    rnd_search = RandomizedSearchCV(DNNClassifier(random_state=42), param_distribs, n_iter=50,
                                     fit_params={"X_valid": X_test4, "y_valid": y_test4, "n_epochs": 1000}, verbose=2)
     rnd_search.fit(X_train4, y_train4)
 

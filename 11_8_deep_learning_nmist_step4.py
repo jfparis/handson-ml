@@ -11,10 +11,18 @@ import numpy as np
 he_init = tf.contrib.layers.variance_scaling_initializer()
 
 
+def leaky_relu(alpha=0.01):
+    def parametrized_leaky_relu(z, name=None):
+        return tf.maximum(alpha * z, z, name=name)
+
+    return parametrized_leaky_relu
+
+
 class DNNClassifier(BaseEstimator, ClassifierMixin):
 
     def __init__(self, n_hidden_layers=5, n_neurons=100, optimizer_class=tf.train.AdamOptimizer,
-                 learning_rate=0.01, batch_size=20, activation=tf.nn.elu, initializer=he_init, random_state = None):
+                 learning_rate=0.01, batch_size=20, activation=tf.nn.elu, initializer=he_init, batch_normalisation = False,
+                 dropout_rate = 0, random_state = None):
         self.n_hidden_layers = n_hidden_layers
         self.n_neurons = n_neurons
         self.optimizer_class = optimizer_class
@@ -25,6 +33,8 @@ class DNNClassifier(BaseEstimator, ClassifierMixin):
         self._session = None
         self.max_checks_without_progress = 20
         self.random_state = random_state
+        self.batch_normalisation = batch_normalisation
+        self.dropout_rate = dropout_rate
 
     def _log_dir(self, prefix=""):
         now = datetime.utcnow().strftime("%Y%m%d%H%M%S")
@@ -40,9 +50,18 @@ class DNNClassifier(BaseEstimator, ClassifierMixin):
 
     def _build_dnn(self, inputs, scope_name):
         with tf.variable_scope(scope_name, "dnn"):
-            for i in range(self.n_hidden_layers):
-                inputs = tf.layers.dense(inputs, self.n_neurons, activation=self.activation, kernel_initializer = self.initializer, name="layer"+str(i))
 
+            training = tf.placeholder_with_default(False, shape=(), name='training')
+            inputs = tf.layers.dropout(inputs, self.dropout_rate, training=training)
+
+            for i in range(self.n_hidden_layers):
+                inputs = tf.layers.dense(inputs, self.n_neurons, kernel_initializer = self.initializer, name="layer"+str(i))
+                if self.batch_normalisation:
+                    inputs = tf.layers.batch_normalization(inputs, training=training, momentum=0.9)
+                inputs = self.activation(inputs)
+                inputs = tf.layers.dropout(inputs, self.dropout_rate, training=training)
+
+            self._training_flag =  training
             return inputs
 
     def _build_graph(self, n_inputs, n_outputs):
@@ -117,6 +136,7 @@ class DNNClassifier(BaseEstimator, ClassifierMixin):
         with self._graph.as_default():
             self._build_graph(n_inputs, n_outputs)
 
+            extra_update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
 
             log_path = self._log_dir()
             filewriter = tf.summary.FileWriter(log_path, tf.get_default_graph())
@@ -134,7 +154,7 @@ class DNNClassifier(BaseEstimator, ClassifierMixin):
                 rnd_idx = np.random.permutation(len(X))
                 for rnd_indices in np.array_split(rnd_idx, len(X) // self.batch_size):
                     X_batch, y_batch = X[rnd_indices], y[rnd_indices]
-                    session.run(self._training_op, feed_dict={self._X: X_batch, self._y: y_batch})
+                    session.run([self._training_op, extra_update_ops], feed_dict={self._X: X_batch, self._y: y_batch, self._training_flag: True})
 
                 if X_valid is not None and y_valid is not None:
                     acc_sum_val, loss_sum_val, accuracy_val, loss_val = session.run([accuracy_str, loss_str, self._accuracy, self._loss ], feed_dict = {self._X: X_valid, self._y: y_valid})
@@ -155,6 +175,7 @@ class DNNClassifier(BaseEstimator, ClassifierMixin):
                 self._restore_model_params(best_params)
                 acc_test = self._accuracy.eval(feed_dict={self._X: X_valid, self._y: y_valid})
                 print("Final test accuracy: {:.2f}%".format(acc_test * 100))
+
 
         return self
 
@@ -189,7 +210,8 @@ def test():
     y_test4 = y_test[test_indices]
 
 
-    dnc = DNNClassifier()
+    dnc = DNNClassifier(batch_size=500, n_neurons=140,  activation=leaky_relu(alpha=0.1), learning_rate=0.01, random_state=42,
+                        batch_normalisation = False, dropout_rate=0.5)
     dnc.fit(X_train4, y_train4, 100, X_test4, y_test4)
 
 
@@ -212,13 +234,6 @@ def main():
     y_train4 = y_train[train_indices]
     y_test4 = y_test[test_indices]
 
-
-    def leaky_relu(alpha=0.01):
-        def parametrized_leaky_relu(z, name=None):
-            return tf.maximum(alpha * z, z, name=name)
-
-        return parametrized_leaky_relu
-
     param_distribs = {
         "n_neurons": [10, 30, 50, 70, 90, 100, 120, 140, 160],
         "batch_size": [10, 50, 100, 500],
@@ -231,9 +246,7 @@ def main():
 
     rnd_search = RandomizedSearchCV(DNNClassifier(random_state=42), param_distribs, n_iter=50,
                                     fit_params={"X_valid": X_test4, "y_valid": y_test4, "n_epochs": 1000}, verbose=2)
-
     rnd_search.fit(X_train4, y_train4)
-    print(rnd_search.best_params_)
 
 #if __name__ == "__main__":
-main()
+test()
