@@ -29,11 +29,6 @@ def log_dir(prefix="", date=True):
     return "{}/{}/".format(root_logdir, name)
 
 
-#with tf.name_scope("inputs"):
-#    X = tf.placeholder(tf.float32, shape=[None, n_inputs], name="X")
-#    X_reshaped = tf.reshape(X, shape=[-1, height, width, channels])
-#    y = tf.placeholder(tf.int32, shape=[None], name="y")
-
 flags = tf.app.flags
 
 #State your dataset directory
@@ -51,7 +46,7 @@ items_to_descriptions = {
 }
 
 
-def get_split(split_name, dataset_dir, file_pattern=file_pattern,):
+def load_dataset(split_name, dataset_dir, batch_size, file_pattern=file_pattern, height=height, width=width):
     """
     Obtains the split - training or validation - to create a Dataset class for feeding the examples into a queue later
     on. This function will set up the decoder and dataset information all into one Dataset class so that you can avoid
@@ -77,96 +72,41 @@ def get_split(split_name, dataset_dir, file_pattern=file_pattern,):
     # Count the total number of examples in all of these shard
     num_samples = 0
     file_pattern_for_counting = 'mnist_' + split_name
-    tfrecords_to_count = [os.path.join(dataset_dir, file) for file in os.listdir(dataset_dir) \
+    tfrecords_files = [os.path.join(dataset_dir, file) for file in os.listdir(dataset_dir) \
                           if file.startswith(file_pattern_for_counting)]
-    for tfrecord_file in tfrecords_to_count:
+    for tfrecord_file in tfrecords_files:
         for record in tf.python_io.tf_record_iterator(tfrecord_file):
             num_samples += 1
 
-    # Create a reader, which must be a TFRecord reader in this case
-    reader = tf.TFRecordReader
+    dataset = tf.contrib.data.TFRecordDataset(tfrecords_files)
 
-    # Create the keys_to_features dictionary for the decoder
-    keys_to_features = {
-        'height': tf.FixedLenFeature((), tf.int64),
-        'width': tf.FixedLenFeature((), tf.int64),
-        'image': tf.FixedLenFeature([], tf.string),
-        'label': tf.FixedLenFeature((), tf.int64),
-    }
+    def _parse_function(example_proto):
+        features = {
+            'height': tf.FixedLenFeature((), tf.int64),
+            'width': tf.FixedLenFeature((), tf.int64),
+            'image': tf.FixedLenFeature([], tf.string),
+            'label': tf.FixedLenFeature((), tf.int64),
+        }
+        parsed_features = tf.parse_single_example(example_proto, features)
+        image = tf.reshape(tf.decode_raw(parsed_features["image"], tf.float32), (height, width, 1))
+        return image, parsed_features["label"]
+    dataset = dataset.map(_parse_function)
+    dataset = dataset.shuffle(buffer_size=24 + 3 * batch_size)
+    dataset = dataset.batch(batch_size)
 
-    # Create the items_to_handlers dictionary for the decoder.
-    items_to_handlers = {
-        'image': slim.tfexample_decoder.Tensor('image'),
-        'label': slim.tfexample_decoder.Tensor('label'),
-    }
-
-    # Start to create the decoder
-    decoder = slim.tfexample_decoder.TFExampleDecoder(keys_to_features, items_to_handlers)
-
-    # Create the labels_to_name file
-    #labels_to_name_dict = labels_to_name
-
-    # Actually create the dataset
-    dataset = slim.dataset.Dataset(
-        data_sources=file_pattern_path,
-        decoder=decoder,
-        reader=reader,
-        num_readers=4,
-        num_samples=num_samples,
-        num_classes=5,
-        #labels_to_name=labels_to_name_dict,
-        items_to_descriptions=items_to_descriptions)
-
-    return dataset
-
-def load_batch(dataset, batch_size, height=height, width=width):
-    '''
-    Loads a batch for training.
-
-    INPUTS:
-    - dataset(Dataset): a Dataset class object that is created from the get_split function
-    - batch_size(int): determines how big of a batch to train
-    - height(int): the height of the image to resize to during preprocessing
-    - width(int): the width of the image to resize to during preprocessing
-
-    OUTPUTS:
-    - images(Tensor): a Tensor of the shape (batch_size, height, width, channels) that contain one batch of images
-    - labels(Tensor): the batch's labels with the shape (batch_size,) (requires one_hot_encoding).
-
-    '''
-    #First create the data_provider object
-    data_provider = slim.dataset_data_provider.DatasetDataProvider(
-        dataset,
-        common_queue_capacity = 24 + 3 * batch_size,
-        common_queue_min = 24)
-
-    #Obtain the raw image using the get method
-    raw_image, label = data_provider.get(['image', 'label'])
-
-    #Perform the correct preprocessing for this image depending if it is training or evaluating
-    image = tf.reshape(tf.decode_raw(raw_image, tf.float32), (height, width,1))
-
-
-    #Batch up the image by enqueing the tensors internally in a FIFO queue and dequeueing many elements with tf.train.batch.
-    images, labels = tf.train.batch(
-        [image, label],
-        batch_size = batch_size,
-        num_threads = 4,
-        capacity = 4 * batch_size,
-        allow_smaller_final_batch = True)
-
-    return images, labels
+    return dataset, num_samples
 
 n_epochs = 20
 batch_size = 500
 
 with tf.name_scope("inputs"):
-    dataset = get_split('train', FLAGS.dataset_dir, file_pattern=file_pattern)
-    images, labels = load_batch(dataset,batch_size, height, width)
+    dataset, num_samples = load_dataset('train', FLAGS.dataset_dir, batch_size, file_pattern=file_pattern)
+    dataset = dataset.repeat()
+    iterator = dataset.make_one_shot_iterator()
+    images, labels = iterator.get_next()
 
-num_batches_per_epoch = int(dataset.num_samples / batch_size)
+num_batches_per_epoch = int(num_samples / batch_size)
 num_steps_per_epoch = num_batches_per_epoch
-#print(num_batches_per_epoch)
 
 conv1_fmaps = 32
 conv1_ksize = 5
@@ -200,28 +140,20 @@ training = tf.placeholder_with_default(False, None, "training")
 conv1 = tf.layers.conv2d(images, filters=conv1_fmaps, kernel_size=conv1_ksize,
                          strides=conv1_stride, padding=conv1_pad, activation=tf.nn.relu, name="conv1")
 
-print(conv1.shape)
-
 norm1 = lrn(conv1, 2, 2e-05, 0.75, name='norm1')
 
 conv2 = tf.layers.conv2d(norm1, filters=conv2_fmaps, kernel_size=conv2_ksize,
                          strides=conv2_stride, padding=conv2_pad, activation=tf.nn.relu, name="conv2")
-
-print(conv2.shape)
 
 norm2 = lrn(conv2, 4, 2e-05, 0.75, name='norm2')
 
 conv3 = tf.layers.conv2d(norm2, filters=conv3_fmaps, kernel_size=conv3_ksize,
                          strides=conv3_stride, padding=conv3_pad, activation=tf.nn.relu, name="conv3")
 
-print(conv3.shape)
-
 norm3 = lrn(conv3, 4, 2e-05, 0.75, name='norm3')
 
 with tf.name_scope("pool3"):
     pool3 = tf.nn.max_pool(norm3, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding="VALID")
-    print(pool3.shape)
-
     pool_flat = tf.reshape(pool3, shape=[-1, conv3_fmaps * 7 * 7])  # can be guessed by pool.shape
 
 fc1 = tf.layers.dense(pool_flat, n_fc1, activation=tf.nn.relu, kernel_initializer=he_init, name="fc1")
@@ -231,10 +163,6 @@ fc1_dropped = tf.layers.dropout(fc1, training=training)
 logits = tf.layers.dense(fc1, outputs, kernel_initializer=he_init, name="logits")
 
 Y_proba = tf.nn.softmax(logits, name="Y_proba")
-
-
-
-
 
 # Create the global step for monitoring the learning_rate and training.
 global_step = get_or_create_global_step()
@@ -272,9 +200,6 @@ def train_step(sess, train_op, global_step):
     #start_time = time.time()
     _, global_step_count, loss_val = sess.run([train_op, global_step, loss])
     #time_elapsed = time.time() - start_time
-
-    # Run the logging to print some results
-    #logging.info('global step %s: loss: %.4f (%.2f sec/step)', global_step_count, loss_val, time_elapsed)
 
     return loss_val, global_step_count
 
