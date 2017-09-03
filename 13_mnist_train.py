@@ -219,7 +219,6 @@ config = tf.ConfigProto(
 sv = tf.train.Supervisor(logdir=log_dir("mnist", False), summary_op=None, init_fn=None)
 
 with sv.managed_session() as session:
-    #init.run()
 
     for step in range(n_epochs * num_batches_per_epoch):
 
