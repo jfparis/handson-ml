@@ -13,21 +13,13 @@ from tensorflow.contrib.framework.python.ops.variables import get_or_create_glob
 env = gym.make("CartPole-v0")
 
 def discount_rewards(rewards, discount_rate):
-    discounted_rewards = np.empty(len(rewards))
+    discounted_rewards = np.zeros_like(rewards)
     cumulative_rewards = 0
     for step in reversed(range(len(rewards))):
         cumulative_rewards = rewards[step] + cumulative_rewards * discount_rate
         discounted_rewards[step] = cumulative_rewards
     return discounted_rewards
 
-def discount_and_normalize_rewards(all_rewards, discount_rate):
-    all_discounted_rewards = [discount_rewards(rewards, discount_rate)
-        for rewards in all_rewards]
-    flat_rewards = np.concatenate(all_discounted_rewards)
-    reward_mean = flat_rewards.mean()
-    reward_std = flat_rewards.std()
-    return [(discounted_rewards - reward_mean)/reward_std
-        for discounted_rewards in all_discounted_rewards]
 
 def log_dir(prefix="", date=True):
     now = datetime.utcnow().strftime("%Y%m%d%H%M%S")
@@ -39,29 +31,32 @@ def log_dir(prefix="", date=True):
 
 # 1. Specify the neural network architecture
 n_inputs = 4 # == env.observation_space.shape[0]
-n_hidden = 4 # it's a simple task, we don't need more hidden neurons
-n_outputs = 1 # only outputs the probability of accelerating left
+n_hidden = 8 # it's a simple task, we don't need more hidden neurons
+n_outputs = 2 # only outputs the probability of accelerating left
 initializer = tf.contrib.layers.variance_scaling_initializer()
 learning_rate = 0.01
 
 # 2. Build the neural network
-X = tf.placeholder(tf.float32, shape=[None, n_inputs])
+state_in = tf.placeholder(tf.float32, shape=[None, n_inputs])
 
-hidden = tf.layers.dense(X, n_hidden, activation=tf.nn.elu, kernel_initializer=initializer)
+hidden = tf.layers.dense(state_in, n_hidden, activation=tf.nn.elu, kernel_initializer=initializer)
 logits = tf.layers.dense(hidden, n_outputs, kernel_initializer=initializer)
-outputs = tf.nn.sigmoid(logits)
+outputs = tf.nn.softmax(logits)
 
 # 3. Select a random action based on the estimated probabilities
-p_left_and_right = tf.concat(axis=1, values=[outputs, 1 - outputs])
-action = tf.multinomial(tf.log(p_left_and_right), num_samples=1)
+# p_left_and_right = tf.concat(axis=1, values=[outputs, 1 - outputs])
+# action = tf.multinomial(tf.log(p_left_and_right), num_samples=1)
 
-y = 1. - tf.to_float(action)
+reward_holder = tf.placeholder(shape=[None], dtype=tf.float32)
+action_holder = tf.placeholder(shape=[None], dtype=tf.int32)
 
-cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(labels=y, logits=logits)
+indexes = tf.range(0, tf.shape(outputs)[0]) * tf.shape(outputs)[1] + action_holder
+responsible_outputs = tf.gather(tf.reshape(outputs, [-1]), indexes)
+loss = -tf.reduce_mean(tf.log(responsible_outputs) * reward_holder)
 
 optimizer = tf.train.AdamOptimizer(learning_rate)
 
-grads_and_vars = optimizer.compute_gradients(cross_entropy)
+grads_and_vars = optimizer.compute_gradients(loss)
 gradients = [grad for grad, variable in grads_and_vars]
 gradient_placeholders = []
 grads_and_vars_feed = []
@@ -100,53 +95,63 @@ config = tf.ConfigProto(
         device_count = {'GPU': 0}
     )
 
-sv = tf.train.Supervisor(logdir=log_dir("cart", False), summary_op=None, init_fn=None)
+sv = tf.train.Supervisor(logdir=log_dir("cart_v2", False), summary_op=None, init_fn=None)
 
 with sv.managed_session(config=config) as sess:
 
     start_iteration = math.floor(tf.train.global_step(sess, global_step))
 
+    gradBuffer = sess.run(tf.trainable_variables())
+    for ix, grad in enumerate(gradBuffer):
+        gradBuffer[ix] = grad * 0
+
     for iteration in range(start_iteration, n_iterations):
         print("Epoch", iteration)
-        print("gstep", tf.train.global_step(sess, global_step))
-        all_rewards = []  # all sequences of raw rewards for each episode
-        all_gradients = []  # gradients saved at each step of each episode
+
+        all_rewards = []  # all sequences of raw rewards for each episode - used for stats
 
         for game in range(n_games_per_update):
             current_rewards = []  # all raw rewards from the current episode
             current_gradients = []  # all gradients from the current episode
+            ep_history = []
             obs = env.reset()
             if render:
                 env.render()
             for step in range(n_max_steps):
-                action_val, gradients_val = sess.run([action, gradients],
-                                                     feed_dict={X: obs.reshape(1, n_inputs)})  # one obs
+                action_val = sess.run(outputs, feed_dict={state_in: obs.reshape(1, n_inputs)})  # one obs
+                a = np.random.choice(action_val[0], p=action_val[0])
+                a = np.argmax(action_val == a)
 
-                obs, reward, done, info = env.step(action_val[0][0])
+                obs1, reward, done, info = env.step(a)
+                ep_history.append([obs, a, reward, obs1])
+                obs = obs1
+                current_rewards.append(reward)
                 if render:
                     env.render()
-                current_rewards.append(reward)
-                current_gradients.append(gradients_val)
                 if done:
                     break
+
             all_rewards.append(current_rewards)
-            all_gradients.append(current_gradients)
+            # compute gradients for the most recent episode
+            ep_history = np.array(ep_history)
+            ep_history[:, 2] = discount_rewards(ep_history[:, 2], discount_rate)
+            feed_dict = {reward_holder: ep_history[:, 2],
+                         action_holder: ep_history[:, 1], state_in: np.vstack(ep_history[:, 0])}
+            grads = sess.run(gradients, feed_dict=feed_dict)
+            for idx, grad in enumerate(grads):
+                gradBuffer[idx] += grad
+
+        rewards_outcome = [np.sum(reward) for reward in all_rewards]
 
         # At this point we have run the policy for 10 episodes, and we are
         # ready for a policy update using the algorithm described earlier.
 
-        rewards_outcome = [np.sum(reward) for reward in all_rewards]
-        all_rewards = discount_and_normalize_rewards(all_rewards, discount_rate)
-        feed_dict = {}
-        for var_index, grad_placeholder in enumerate(gradient_placeholders):
-            # multiply the gradients by the action scores, and compute the mean
-            mean_gradients = np.mean([reward * all_gradients[game_index][step][var_index]
-                                      for game_index, rewards in enumerate(all_rewards)
-                                      for step, reward in enumerate(rewards)],
-                                     axis=0)
-            feed_dict[grad_placeholder] = mean_gradients
         print("upgrading gradients")
-        sess.run(training_op, feed_dict=feed_dict)
+
+        feed_dict = dictionary = dict(zip(gradient_placeholders, gradBuffer))
+        _ = sess.run(training_op, feed_dict=feed_dict)
+        for ix, grad in enumerate(gradBuffer):
+            gradBuffer[ix] = grad * 0
 
         summaries = sess.run(my_summary_op, feed_dict={avg_reward: np.mean(rewards_outcome), max_reward: np.max(rewards_outcome), min_reward: np.min(rewards_outcome)})
         sv.summary_computed(sess, summaries)
