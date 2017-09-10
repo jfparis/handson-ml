@@ -55,6 +55,8 @@ outputs = tf.nn.sigmoid(logits)
 p_left_and_right = tf.concat(axis=1, values=[outputs, 1 - outputs])
 action = tf.multinomial(tf.log(p_left_and_right), num_samples=1)
 
+y = 1. - tf.to_float(action)
+
 cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(labels=y, logits=logits)
 
 optimizer = tf.train.AdamOptimizer(learning_rate)

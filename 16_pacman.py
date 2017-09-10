@@ -35,7 +35,6 @@ def repeat_upsample(rgb_array, k=1, l=1, err=[]):
     # repeat kinda crashes if k/l are zero
     if k <= 0 or l <= 0:
         if not err:
-            #print "Number of repeats must be larger than 0, k: {}, l: {}, returning default array!".format(k, l)
             err.append('logged')
         return rgb_array
 
@@ -176,8 +175,7 @@ with sv.managed_session() as sess:   #config=config
 
     while True:
         step = tf.train.global_step(sess, global_step)
-        if step % 10 ==0:
-            print("epoch ", step)
+        step = tf.train.global_step(sess, global_step)
         if step >= n_steps:
             break
 
