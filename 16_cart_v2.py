@@ -21,6 +21,12 @@ def discount_rewards(rewards, discount_rate):
     return discounted_rewards
 
 
+def discount_and_normalize_reward(rewards, discount_rate):
+    discounted_rewards = discount_rewards(rewards, discount_rate)
+    reward_mean = discounted_rewards.mean()
+    reward_std = discounted_rewards.std()
+    return (discounted_rewards - reward_mean)/reward_std
+
 def log_dir(prefix="", date=True):
     now = datetime.utcnow().strftime("%Y%m%d%H%M%S")
     root_logdir = "tf_logs"
@@ -31,7 +37,7 @@ def log_dir(prefix="", date=True):
 
 # 1. Specify the neural network architecture
 n_inputs = 4 # == env.observation_space.shape[0]
-n_hidden = 8 # it's a simple task, we don't need more hidden neurons
+n_hidden = 4 # it's a simple task, we don't need more hidden neurons
 n_outputs = 2 # only outputs the probability of accelerating left
 initializer = tf.contrib.layers.variance_scaling_initializer()
 learning_rate = 0.01
@@ -134,7 +140,7 @@ with sv.managed_session(config=config) as sess:
             all_rewards.append(current_rewards)
             # compute gradients for the most recent episode
             ep_history = np.array(ep_history)
-            ep_history[:, 2] = discount_rewards(ep_history[:, 2], discount_rate)
+            ep_history[:, 2] = discount_and_normalize_reward(ep_history[:, 2], discount_rate)
             feed_dict = {reward_holder: ep_history[:, 2],
                          action_holder: ep_history[:, 1], state_in: np.vstack(ep_history[:, 0])}
             grads = sess.run(gradients, feed_dict=feed_dict)
