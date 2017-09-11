@@ -87,7 +87,6 @@ saver = tf.train.Saver()
 n_iterations = 2000
 n_max_steps = 1000
 n_games_per_update = 10
-save_iterations = 10
 discount_rate = 0.95
 
 render = False
@@ -139,7 +138,7 @@ with sv.managed_session(config=config) as sess:
                          action_holder: ep_history[:, 1], state_in: np.vstack(ep_history[:, 0])}
             grads = sess.run(gradients, feed_dict=feed_dict)
             for idx, grad in enumerate(grads):
-                gradBuffer[idx] += grad
+                gradBuffer[idx] += grad/n_games_per_update
 
         rewards_outcome = [np.sum(reward) for reward in all_rewards]
 
