@@ -20,6 +20,11 @@ def discount_rewards(rewards, discount_rate):
         discounted_rewards[step] = cumulative_rewards
     return discounted_rewards
 
+def discount_and_normalize_reward(rewards, discount_rate):
+    discounted_rewards = discount_rewards(rewards, discount_rate)
+    reward_mean = discounted_rewards.mean()
+    reward_std = discounted_rewards.std()
+    return (discounted_rewards - reward_mean)/reward_std
 
 def log_dir(prefix="", date=True):
     now = datetime.utcnow().strftime("%Y%m%d%H%M%S")
@@ -43,18 +48,12 @@ hidden = tf.layers.dense(state_in, n_hidden, activation=tf.nn.elu, kernel_initia
 logits = tf.layers.dense(hidden, n_outputs, kernel_initializer=initializer)
 outputs = tf.nn.sigmoid(logits)
 
-# 3. Select a random action based on the estimated probabilities
-# p_left_and_right = tf.concat(axis=1, values=[outputs, 1 - outputs])
-# action = tf.multinomial(tf.log(p_left_and_right), num_samples=1)
-
 reward_holder = tf.placeholder(shape=[None], dtype=tf.float32)
 action_holder = tf.placeholder(shape=[None], dtype=tf.int32)
 f_action_holder = tf.cast(action_holder,tf.float32)
 
-#indexes = tf.range(0, tf.shape(outputs)[0]) * tf.shape(outputs)[1] + action_holder
-#responsible_outputs = tf.gather(tf.reshape(outputs, [-1]), indexes)
-#loss = -tf.reduce_mean(tf.log(responsible_outputs) * reward_holder)
-loss = -tf.reduce_mean(tf.log(f_action_holder*(f_action_holder - outputs) + (1 - f_action_holder)*(f_action_holder + outputs))*reward_holder)
+cross_entropy = f_action_holder*tf.log(outputs) + (1-f_action_holder)*tf.log(1-outputs)
+loss = -tf.reduce_mean(cross_entropy*reward_holder)
 
 optimizer = tf.train.AdamOptimizer(learning_rate)
 
@@ -121,11 +120,10 @@ with sv.managed_session(config=config) as sess:
                 env.render()
             for step in range(n_max_steps):
                 action_val = sess.run(outputs, feed_dict={state_in: obs.reshape(1, n_inputs)})  # one obs
-                print(action_val)
-                a = np.argmax(np.random.multinomial(1,[action_val[0][0], 1-action_val[0][0]]))
-                print(a)
+                a = 1 if np.random.uniform() < action_val else 0
+                y = 1 if a == 0 else 0
                 obs1, reward, done, info = env.step(a)
-                ep_history.append([obs, a, reward, obs1])
+                ep_history.append([obs, y, reward, obs1])
                 obs = obs1
                 current_rewards.append(reward)
                 if render:
@@ -136,7 +134,7 @@ with sv.managed_session(config=config) as sess:
             all_rewards.append(current_rewards)
             # compute gradients for the most recent episode
             ep_history = np.array(ep_history)
-            ep_history[:, 2] = discount_rewards(ep_history[:, 2], discount_rate)
+            ep_history[:, 2] = discount_and_normalize_reward(ep_history[:, 2], discount_rate)
             feed_dict = {reward_holder: ep_history[:, 2],
                          action_holder: ep_history[:, 1], state_in: np.vstack(ep_history[:, 0])}
             grads = sess.run(gradients, feed_dict=feed_dict)
