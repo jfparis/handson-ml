@@ -1,8 +1,6 @@
 import tensorflow as tf
 import numpy as np
 import os, os.path
-import matplotlib
-import matplotlib.pyplot as plt
 from  datetime import datetime
 import math
 import urllib, sys, tarfile
@@ -174,7 +172,7 @@ training = tf.placeholder_with_default(False, shape=[])
 tr_dataset, labels_encoding, tr_num_samples = build_picture_dataset("datasets/dogscats/train", randomise=True)
 print(f"Loading dataset with {tr_num_samples} samples")
 tr_dataset = preprocessing_images_2(tr_dataset,299,299,max_zoom=1.2,flip=True)
-#tr_dataset = tr_dataset.repeat(10)
+tr_dataset = tr_dataset.repeat()
 tr_dataset = tr_dataset.batch(batch_size)
 
 num_batches_per_epoch = int(tr_num_samples / batch_size)
@@ -220,7 +218,6 @@ with tf.name_scope("train"):
 with tf.name_scope("eval"):
     correct = tf.nn.in_top_k(dogcats_logits, y, 1)
     accuracy = tf.reduce_mean(tf.cast(correct, tf.float32))
-    #accuracy = tf.metrics.accuracy(y, y_proba)
 
 
     
@@ -237,23 +234,19 @@ with tf.name_scope("init_and_save"):
     saver = tf.train.Saver() 
     
 # Now we need to create a training step function that runs both the train_op, metrics_op and updates the global_step concurrently.
-def train_step(sess, train_op, global_step):
+def train_step(sess, train_op, global_step, with_summary = False):
     '''
     Simply runs a session for the three arguments provided and gives a logging on the time elapsed for each global step
     '''
-    # Check the time for each sess run
-    #start_time = time.time()
-    _, global_step_count, loss_val = sess.run([train_op, global_step, loss])
-    #time_elapsed = time.time() - start_time
+    summaries = None
+    if with_summary:
+        _, global_step_count, loss_val, summaries = sess.run([train_op, global_step, loss, my_summary_op])
+    else:
+        _, global_step_count, loss_val = sess.run([train_op, global_step, loss])
 
-    return loss_val, global_step_count
+    return loss_val, summaries, global_step_count
 
 
-
-# Define your supervisor for running a managed session. Do not run the summary_op automatically or else it will consume too much memory
-#sv = tf.train.Supervisor(logdir=log_dir("cats_dogs", False), summary_op=None, init_fn=None)
-
-#with sv.managed_session() as session:
 with tf.Session() as session:
 
     if os.path.exists(checkpoint_file):
@@ -283,13 +276,12 @@ with tf.Session() as session:
 
         # Log the summaries every 10 step.
         if step % 10 == 0:
-            loss_val, global_step_count = train_step(session, training_op, global_step)
+            loss_val, summaries, global_step_count = train_step(session, training_op, global_step, with_summary = True)
             print("Loss:", loss_val, "at", global_step_count)
-            summaries = session.run(my_summary_op)
             summary_writer.add_summary(summaries, global_step_count)
 
         else:
-            loss_val, _ = train_step(session, training_op, global_step)
+            loss_val, _, _ = train_step(session, training_op, global_step)
 
         if step % 50 == 0:
             saver.save(session, checkpoint_path, global_step=global_step)
